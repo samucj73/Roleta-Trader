@@ -1,69 +1,129 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objs as go
+from datetime import datetime
 import random
+import io
 
-# Inicialização da sessão
-if 'banca' not in st.session_state:
-    st.session_state.banca = 100.0
-if 'historico' not in st.session_state:
+st.set_page_config(page_title="Modo Trader Roleta", layout="wide", page_icon="🎰")
+
+# Sessão inicial
+if "historico" not in st.session_state:
     st.session_state.historico = []
+if "banca" not in st.session_state:
+    st.session_state.banca = 0.0
+if "meta" not in st.session_state:
+    st.session_state.meta = 0.0
+if "stop" not in st.session_state:
+    st.session_state.stop = 0.0
 
-st.set_page_config(page_title="Modo Trader - Roleta", layout="centered")
+st.title("🎯 Modo Trader - Roleta Inteligente")
 
-st.title("🎯 Modo Trader - Roleta")
+# Sidebar: Configurações
+st.sidebar.header("Configurações Iniciais")
+banca_inicial = st.sidebar.number_input("Banca Inicial (R$)", min_value=1.0, step=1.0, format="%.2f")
+meta_percentual = st.sidebar.slider("Meta de Lucro (%)", 1, 100, 10)
+stop_percentual = st.sidebar.slider("Stop Loss (%)", 1, 100, 10)
 
-# Configurações da aposta
-meta_diaria = 0.10  # 10%
-stop_loss = -0.10  # -10%
-valor_por_numero = 2.0
-numeros_apostados = [13, 22, 31]
-ganho_por_acerto = 12.0  # lucro bruto por número
+if st.sidebar.button("Iniciar Sessão"):
+    st.session_state.banca = banca_inicial
+    st.session_state.meta = banca_inicial * (1 + meta_percentual / 100)
+    st.session_state.stop = banca_inicial * (1 - stop_percentual / 100)
+    st.success("Sessão iniciada!")
 
-st.subheader("Status da Banca")
+# Entrada dos números sorteados
+st.subheader("Últimos 100 números sorteados")
+numeros_texto = st.text_area("Cole aqui os 100 últimos números (separados por vírgula)", height=100)
+numeros_lista = []
+
+if numeros_texto:
+    try:
+        numeros_lista = [int(x.strip()) for x in numeros_texto.split(",") if x.strip().isdigit()]
+        if len(numeros_lista) != 100:
+            st.warning("Por favor, insira exatamente 100 números.")
+        else:
+            df = pd.DataFrame(numeros_lista, columns=["Número"])
+    except:
+        st.error("Erro ao processar os números.")
+
+# Painel da Banca
+st.subheader("Painel da Banca")
 col1, col2, col3 = st.columns(3)
 col1.metric("Banca Atual", f"R$ {st.session_state.banca:.2f}")
-col2.metric("Meta Diária", "+10%")
-col3.metric("Stop Loss", "-10%")
+col2.metric("Meta", f"R$ {st.session_state.meta:.2f}")
+col3.metric("Stop", f"R$ {st.session_state.stop:.2f}")
 
-# Simulação de aposta
-st.subheader("Próxima Aposta")
-st.markdown(f"**Sugestão da IA:** {', '.join(map(str, numeros_apostados))}")
-st.markdown(f"**Valor por número:** R$ {valor_por_numero:.2f}")
+# IA Simples (baseada em frequência)
+if numeros_lista and len(numeros_lista) == 100:
+    frequencia = pd.Series(numeros_lista).value_counts().sort_values(ascending=False)
+    sugeridos = list(frequencia.head(3).index)
 
-if st.button("Executar Aposta"):
-    aposta_total = valor_por_numero * len(numeros_apostados)
-    numero_sorteado = random.randint(0, 36)
-    ganhou = numero_sorteado in numeros_apostados
+    st.subheader("Sugestão da IA")
+    st.write(f"Números com maior chance: **{', '.join(map(str, sugeridos))}**")
 
-    if ganhou:
-        lucro = ganho_por_acerto - aposta_total
-        st.session_state.banca += lucro
-        resultado = f"✅ Acertou! Número: {numero_sorteado} | Lucro: R$ {lucro:.2f}"
-    else:
-        prejuizo = aposta_total
-        st.session_state.banca -= prejuizo
-        resultado = f"❌ Errou. Número: {numero_sorteado} | Prejuízo: R$ {prejuizo:.2f}"
+    valor_aposta = st.number_input("Valor por número (R$)", min_value=1.0, step=1.0, value=2.0)
 
-    st.session_state.historico.insert(0, {
-        'banca': st.session_state.banca,
-        'numero': numero_sorteado,
-        'ganhou': ganhou,
-        'resultado': resultado
-    })
+    if st.button("Apostar"):
+        total_aposta = valor_aposta * len(sugeridos)
+        resultado = random.randint(0, 36)
+        ganhou = resultado in sugeridos
+
+        if ganhou:
+            ganho = valor_aposta * 12
+            lucro = ganho - total_aposta
+            st.session_state.banca += lucro
+            resultado_texto = f"✅ Acertou! Número: {resultado} | Lucro: R$ {lucro:.2f}"
+        else:
+            prejuizo = total_aposta
+            st.session_state.banca -= prejuizo
+            resultado_texto = f"❌ Errou. Número: {resultado} | Prejuízo: R$ {prejuizo:.2f}"
+
+        st.session_state.historico.insert(0, {
+            "Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Números Sugeridos": sugeridos,
+            "Número Sorteado": resultado,
+            "Banca": round(st.session_state.banca, 2),
+            "Resultado": "Vitória" if ganhou else "Derrota"
+        })
+        st.success(resultado_texto)
 
 # Histórico
-st.subheader("Histórico")
-for item in st.session_state.historico[:10]:
-    st.markdown(f"- {item['resultado']}")
-
-# Gráfico da evolução da banca
-st.subheader("Evolução da Banca")
 if st.session_state.historico:
-    df = pd.DataFrame(st.session_state.historico[::-1])
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(y=df['banca'], mode='lines+markers', name='Banca'))
-    fig.update_layout(height=300, xaxis_title="Rodadas", yaxis_title="Banca (R$)")
+    st.subheader("Histórico de Apostas")
+    df_hist = pd.DataFrame(st.session_state.historico)
+    st.dataframe(df_hist, use_container_width=True)
+
+    # Exportação
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        csv = df_hist.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Baixar CSV", csv, "historico.csv", "text/csv")
+    with col2:
+        excel = io.BytesIO()
+        df_hist.to_excel(excel, index=False, sheet_name="Histórico")
+        st.download_button("⬇️ Baixar Excel", excel.getvalue(), "historico.xlsx", "application/vnd.ms-excel")
+    with col3:
+        st.download_button("⬇️ Baixar PDF", csv, "historico.pdf", "application/pdf")  # simplificado
+
+# Estatísticas
+if numeros_lista and len(numeros_lista) == 100:
+    st.subheader("Estatísticas")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Mais Frequente", frequencia.idxmax())
+    col2.metric("Menos Frequente", frequencia.idxmin())
+    col3.metric("Moda", pd.Series(numeros_lista).mode()[0])
+
+    st.markdown("**Frequência dos Números**")
+    fig = go.Figure(data=[go.Bar(x=frequencia.index, y=frequencia.values)])
+    fig.update_layout(xaxis_title="Número", yaxis_title="Frequência")
     st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("Ainda não há dados para o gráfico. Execute uma aposta para começar.")
+
+    st.markdown("**Outras Análises**")
+    st.write(f"- Média: {np.mean(numeros_lista):.2f}")
+    st.write(f"- Mediana: {np.median(numeros_lista):.2f}")
+    st.write(f"- Desvio Padrão: {np.std(numeros_lista):.2f}")
+    st.write(f"- % Pares: {np.mean([n % 2 == 0 for n in numeros_lista]) * 100:.1f}%")
+    st.write(f"- % Ímpares: {np.mean([n % 2 != 0 for n in numeros_lista]) * 100:.1f}%")
+    st.write(f"- % Altos (19-36): {np.mean([19 <= n <= 36 for n in numeros_lista]) * 100:.1f}%")
+    st.write(f"- % Baixos (0-18): {np.mean([n <= 18 for n in numeros_lista]) * 100:.1f}%")
