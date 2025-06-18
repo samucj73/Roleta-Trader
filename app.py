@@ -1,129 +1,200 @@
 import streamlit as st
-import pandas as pd
+import json
+import os
+import logging
+import requests
+from collections import Counter
+from streamlit_autorefresh import st_autorefresh
+from roleta_ia import RoletaIA, get_coluna, get_duzia
 import numpy as np
-import plotly.graph_objs as go
-from datetime import datetime
-import random
-import io
 
-st.set_page_config(page_title="Modo Trader Roleta", layout="wide", page_icon="🎰")
+HISTORICO_PATH = "historico_resultados.json"
+API_URL = "https://api.casinoscores.com/svc-evolution-game-events/api/xxxtremelightningroulette/latest"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-# Sessão inicial
-if "historico" not in st.session_state:
-    st.session_state.historico = []
-if "banca" not in st.session_state:
-    st.session_state.banca = 0.0
-if "meta" not in st.session_state:
-    st.session_state.meta = 0.0
-if "stop" not in st.session_state:
-    st.session_state.stop = 0.0
-
-st.title("🎯 Modo Trader - Roleta Inteligente")
-
-# Sidebar: Configurações
-st.sidebar.header("Configurações Iniciais")
-banca_inicial = st.sidebar.number_input("Banca Inicial (R$)", min_value=1.0, step=1.0, format="%.2f")
-meta_percentual = st.sidebar.slider("Meta de Lucro (%)", 1, 100, 10)
-stop_percentual = st.sidebar.slider("Stop Loss (%)", 1, 100, 10)
-
-if st.sidebar.button("Iniciar Sessão"):
-    st.session_state.banca = banca_inicial
-    st.session_state.meta = banca_inicial * (1 + meta_percentual / 100)
-    st.session_state.stop = banca_inicial * (1 - stop_percentual / 100)
-    st.success("Sessão iniciada!")
-
-# Entrada dos números sorteados
-st.subheader("Últimos 100 números sorteados")
-numeros_texto = st.text_area("Cole aqui os 100 últimos números (separados por vírgula)", height=100)
-numeros_lista = []
-
-if numeros_texto:
+def fetch_latest_result():
     try:
-        numeros_lista = [int(x.strip()) for x in numeros_texto.split(",") if x.strip().isdigit()]
-        if len(numeros_lista) != 100:
-            st.warning("Por favor, insira exatamente 100 números.")
+        response = requests.get(API_URL, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        game_data = data.get("data", {})
+        result = game_data.get("result", {})
+        outcome = result.get("outcome", {})
+        lucky_list = result.get("luckyNumbersList", [])
+
+        number = outcome.get("number")
+        color = outcome.get("color", "-")
+        timestamp = game_data.get("startedAt")
+        lucky_numbers = [item["number"] for item in lucky_list]
+
+        return {
+            "number": number,
+            "color": color,
+            "timestamp": timestamp,
+            "lucky_numbers": lucky_numbers
+        }
+    except Exception as e:
+        logging.error(f"Erro ao buscar resultado da API: {e}")
+        return None
+
+def salvar_resultado_em_arquivo(history, caminho=HISTORICO_PATH):
+    dados_existentes = []
+
+    if os.path.exists(caminho):
+        with open(caminho, "r") as f:
+            try:
+                dados_existentes = json.load(f)
+            except json.JSONDecodeError:
+                logging.warning("Arquivo JSON vazio ou corrompido. Recriando arquivo.")
+                dados_existentes = []
+
+    timestamps_existentes = {item['timestamp'] for item in dados_existentes if 'timestamp' in item}
+    novos_filtrados = [item for item in history if item.get('timestamp') not in timestamps_existentes]
+    dados_existentes.extend(novos_filtrados)
+    dados_existentes.sort(key=lambda x: x.get('timestamp', 'manual'))
+
+    with open(caminho, "w") as f:
+        json.dump(dados_existentes, f, indent=2)
+
+st.set_page_config(page_title="Roleta IA", layout="wide")
+st.title("🎯 Previsão Inteligente de Roleta")
+
+min_sorteios_para_prever = st.slider("Quantidade mínima de sorteios para previsão", 5, 100, 18)
+
+st.subheader("✍️ Inserir até 100 Sorteios Anteriores Manualmente")
+input_numbers = st.text_area("Digite os números separados por espaço (ex: 12 27 0 33 ...):", height=100)
+
+if st.button("Adicionar Sorteios Manuais"):
+    try:
+        nums = [int(n.strip()) for n in input_numbers.split() if n.strip().isdigit() and 0 <= int(n.strip()) <= 36]
+        if len(nums) > 100:
+            st.warning("Você só pode inserir até 100 números.")
         else:
-            df = pd.DataFrame(numeros_lista, columns=["Número"])
+            for numero in nums:
+                st.session_state.historico.append({
+                    "number": numero,
+                    "color": "-",
+                    "timestamp": f"manual_{len(st.session_state.historico)}",
+                    "lucky_numbers": []
+                })
+            salvar_resultado_em_arquivo(st.session_state.historico)
+            st.success(f"{len(nums)} números adicionados ao histórico com sucesso.")
     except:
-        st.error("Erro ao processar os números.")
+        st.error("Erro ao interpretar os números. Use apenas inteiros separados por espaço.")
 
-# Painel da Banca
-st.subheader("Painel da Banca")
-col1, col2, col3 = st.columns(3)
-col1.metric("Banca Atual", f"R$ {st.session_state.banca:.2f}")
-col2.metric("Meta", f"R$ {st.session_state.meta:.2f}")
-col3.metric("Stop", f"R$ {st.session_state.stop:.2f}")
+count = st_autorefresh(interval=40000, limit=None, key="auto_refresh")
 
-# IA Simples (baseada em frequência)
-if numeros_lista and len(numeros_lista) == 100:
-    frequencia = pd.Series(numeros_lista).value_counts().sort_values(ascending=False)
-    sugeridos = list(frequencia.head(3).index)
+if "historico" not in st.session_state:
+    if os.path.exists(HISTORICO_PATH):
+        with open(HISTORICO_PATH, "r") as f:
+            try:
+                st.session_state.historico = json.load(f)
+            except:
+                st.session_state.historico = []
+    else:
+        st.session_state.historico = []
 
-    st.subheader("Sugestão da IA")
-    st.write(f"Números com maior chance: **{', '.join(map(str, sugeridos))}**")
+if "acertos" not in st.session_state:
+    st.session_state.acertos = []
 
-    valor_aposta = st.number_input("Valor por número (R$)", min_value=1.0, step=1.0, value=2.0)
+if "previsoes" not in st.session_state:
+    st.session_state.previsoes = []
 
-    if st.button("Apostar"):
-        total_aposta = valor_aposta * len(sugeridos)
-        resultado = random.randint(0, 36)
-        ganhou = resultado in sugeridos
+if "roleta_ia" not in st.session_state:
+    st.session_state.roleta_ia = RoletaIA(janela_min=min_sorteios_para_prever)
 
-        if ganhou:
-            ganho = valor_aposta * 12
-            lucro = ganho - total_aposta
-            st.session_state.banca += lucro
-            resultado_texto = f"✅ Acertou! Número: {resultado} | Lucro: R$ {lucro:.2f}"
-        else:
-            prejuizo = total_aposta
-            st.session_state.banca -= prejuizo
-            resultado_texto = f"❌ Errou. Número: {resultado} | Prejuízo: R$ {prejuizo:.2f}"
+resultado = fetch_latest_result()
+ultimo_timestamp = (
+    st.session_state.historico[-1]["timestamp"] if st.session_state.historico else None
+)
 
-        st.session_state.historico.insert(0, {
-            "Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Números Sugeridos": sugeridos,
-            "Número Sorteado": resultado,
-            "Banca": round(st.session_state.banca, 2),
-            "Resultado": "Vitória" if ganhou else "Derrota"
-        })
-        st.success(resultado_texto)
+if resultado and resultado["timestamp"] != ultimo_timestamp:
+    novo_resultado = {
+        "number": resultado["number"],
+        "color": resultado["color"],
+        "timestamp": resultado["timestamp"],
+        "lucky_numbers": resultado["lucky_numbers"]
+    }
+    st.session_state.historico.append(novo_resultado)
+    salvar_resultado_em_arquivo([novo_resultado])
+    st.toast(f"🎲 Novo número capturado: {novo_resultado['number']}")
+    previsoes = st.session_state.roleta_ia.prever_numeros(st.session_state.historico)
+    st.session_state.previsoes = previsoes
+    if resultado["number"] in previsoes:
+        if resultado["number"] not in st.session_state.acertos:
+            st.session_state.acertos.append(resultado["number"])
+            st.toast(f"✅ Acerto! {resultado['number']} estava na previsão!")
+else:
+    st.info("⏳ Aguardando novo sorteio...")
 
-# Histórico
-if st.session_state.historico:
-    st.subheader("Histórico de Apostas")
-    df_hist = pd.DataFrame(st.session_state.historico)
-    st.dataframe(df_hist, use_container_width=True)
+st.subheader("🧾 Últimos Sorteios")
+ultimos_numeros = " ".join(str(h["number"]) for h in st.session_state.historico[-10:])
+st.write(f"Últimos sorteios: {ultimos_numeros}")
 
-    # Exportação
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        csv = df_hist.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Baixar CSV", csv, "historico.csv", "text/csv")
-    with col2:
-        excel = io.BytesIO()
-        df_hist.to_excel(excel, index=False, sheet_name="Histórico")
-        st.download_button("⬇️ Baixar Excel", excel.getvalue(), "historico.xlsx", "application/vnd.ms-excel")
-    with col3:
-        st.download_button("⬇️ Baixar PDF", csv, "historico.pdf", "application/pdf")  # simplificado
+st.subheader("🔮 Previsão dos Próximos 4 Números")
+if st.session_state.previsoes:
+    previsoes_formatadas = " ".join(str(n) for n in st.session_state.previsoes)
+    st.success(f"Previsões: {previsoes_formatadas}")
+else:
+    st.warning("Aguardando sorteios suficientes para iniciar...")
 
-# Estatísticas
-if numeros_lista and len(numeros_lista) == 100:
-    st.subheader("Estatísticas")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Mais Frequente", frequencia.idxmax())
-    col2.metric("Menos Frequente", frequencia.idxmin())
-    col3.metric("Moda", pd.Series(numeros_lista).mode()[0])
+# Exibição dos padrões detectados
+st.subheader("🧠 Padrões detectados no último sorteio analisado")
+if len(st.session_state.historico) >= st.session_state.roleta_ia.janela_max:
+    ultimo_num = st.session_state.historico[-1]["number"]
+    anteriores = [h["number"] for h in st.session_state.historico[-4:-1]]
+    padroes_detectados = []
 
-    st.markdown("**Frequência dos Números**")
-    fig = go.Figure(data=[go.Bar(x=frequencia.index, y=frequencia.values)])
-    fig.update_layout(xaxis_title="Número", yaxis_title="Frequência")
-    st.plotly_chart(fig, use_container_width=True)
+    if ultimo_num % 2 == 0:
+        padroes_detectados.append("Número par")
+    else:
+        padroes_detectados.append("Número ímpar")
 
-    st.markdown("**Outras Análises**")
-    st.write(f"- Média: {np.mean(numeros_lista):.2f}")
-    st.write(f"- Mediana: {np.median(numeros_lista):.2f}")
-    st.write(f"- Desvio Padrão: {np.std(numeros_lista):.2f}")
-    st.write(f"- % Pares: {np.mean([n % 2 == 0 for n in numeros_lista]) * 100:.1f}%")
-    st.write(f"- % Ímpares: {np.mean([n % 2 != 0 for n in numeros_lista]) * 100:.1f}%")
-    st.write(f"- % Altos (19-36): {np.mean([19 <= n <= 36 for n in numeros_lista]) * 100:.1f}%")
-    st.write(f"- % Baixos (0-18): {np.mean([n <= 18 for n in numeros_lista]) * 100:.1f}%")
+    if ultimo_num >= 19:
+        padroes_detectados.append("Número alto (19–36)")
+    else:
+        padroes_detectados.append("Número baixo (1–18)")
+
+    col = get_coluna(ultimo_num)
+    padroes_detectados.append(f"Coluna: {col}")
+
+    duzia = get_duzia(ultimo_num)
+    padroes_detectados.append(f"Dúzia: {duzia}")
+
+    if ultimo_num in anteriores:
+        padroes_detectados.append("Repetição recente (últimos 3)")
+
+    distancias = [abs(ultimo_num - ant) for ant in anteriores]
+    if distancias and np.mean(distancias) <= 3:
+        padroes_detectados.append("Distância média baixa entre últimos números")
+
+    for p in padroes_detectados:
+        st.markdown(f"- {p}")
+else:
+    st.info("Padrões serão exibidos após sorteios suficientes.")
+
+st.subheader("🏅 Acertos da IA")
+col1, col2 = st.columns([4, 1])
+with col1:
+    if st.session_state.acertos:
+        acertos_formatados = " ".join(str(n) for n in st.session_state.acertos)
+        st.success(f"Acertos: {acertos_formatados}")
+    else:
+        st.info("Nenhum acerto.")
+with col2:
+    if st.button("Resetar Acertos"):
+        st.session_state.acertos = []
+        st.toast("Acertos resetados.")
+
+st.subheader("📊 Taxa de Acertos")
+total_prev = len([
+    h for h in st.session_state.historico if h["number"] not in (None, 0)
+]) - min_sorteios_para_prever
+if total_prev > 0:
+    acertos = len(st.session_state.acertos)
+    taxa = acertos / total_prev * 100
+    st.info(f"Taxa de acerto: {taxa:.2f}% ({acertos}/{total_prev})")
+else:
+    st.warning("Taxa será exibida após sorteios suficientes.")
